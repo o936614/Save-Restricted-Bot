@@ -15,6 +15,9 @@ from pyrogram import Client, filters
 from pyrogram.errors import UserAlreadyParticipant, InviteHashExpired, UsernameNotOccupied, PeerIdInvalid
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
+from keep_alive import keep_alive
+keep_alive()
+
 import time
 import os
 import threading
