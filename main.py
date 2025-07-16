@@ -1,3 +1,15 @@
+import subprocess
+import sys
+
+# تثبيت الحزم المطلوبة إذا لم تكن موجودة
+required_packages = ["pyrogram, tgcrypto"]
+for pkg in required_packages:
+    try:
+        __import__(pkg)
+    except ImportError:
+        print(f"Installing {pkg} ...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
+
 import pyrogram
 from pyrogram import Client, filters
 from pyrogram.errors import UserAlreadyParticipant, InviteHashExpired, UsernameNotOccupied, PeerIdInvalid
@@ -21,6 +33,9 @@ if ss is not None:
     acc = Client("myacc" ,api_id=api_id, api_hash=api_hash, session_string=ss)
     acc.start()
 else: acc = None
+
+user_bulk_state = {}  # user_id: {"step": 1, "first_link": None}
+user_single_state = set()  # user_id الذين ينتظرون رابط واحد بعد /single
 
 # download status
 def downstatus(statusfile,message):
@@ -64,7 +79,6 @@ def filter_entities(entities):
     """Remove entities with unknown users to avoid PeerIdInvalid error."""
     filtered = []
     for e in entities or []:
-        # إذا كان الـ entity يحتوي على user، تحقق أن لديه id معرف
         if hasattr(e, "user"):
             if getattr(e.user, "id", None) is not None:
                 filtered.append(e)
@@ -75,19 +89,126 @@ def filter_entities(entities):
 # start command
 @bot.on_message(filters.command(["start"]))
 def send_start(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
-    bot.send_message(message.chat.id, f"__👋 Hi **{message.from_user.mention}**, I am Save Restricted Bot, I can send you restricted content by it's post link__")
+    bot.send_message(message.chat.id, f"__👋 Hi **{message.from_user.mention}**, I am Save Restricted Bot, I can send you restricted content by its post link__")
+
+# إضافة أمر /single لمعالجة رابط واحد فقط
+@bot.on_message(filters.command(["single"]))
+def single_command(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
+    user_single_state.add(message.from_user.id)
+    bot.send_message(message.chat.id, "يرجى إرسال رابط الرسالة التي تريد معالجتها.")
+
+# إضافة أمر /bulk لمعالجة عدة روابط
+@bot.on_message(filters.command(["bulk"]))
+def bulk_command(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
+    user_id = message.from_user.id
+    user_bulk_state[user_id] = {"step": 1, "first_link": None}
+    bot.send_message(message.chat.id, "يرجى إرسال رابط الرسالة الأولى.")
 
 @bot.on_message(filters.text)
 def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_media.message.Message):
-    print(message.text)
+    user_id = message.from_user.id
 
-    # joining chats
-    if "https://t.me/+" in message.text or "https://t.me/joinchat/" in message.text:
+    # معالجة حالة /bulk
+    if user_id in user_bulk_state:
+        state = user_bulk_state[user_id]
+        if state["step"] == 1:
+            state["first_link"] = message.text.strip()
+            state["step"] = 2
+            bot.send_message(message.chat.id, "يرجى إرسال رابط الرسالة الأخيرة.")
+            return
+        elif state["step"] == 2:
+            first_link = state["first_link"]
+            last_link = message.text.strip()
+            del user_bulk_state[user_id]
+            try:
+                # استخراج بيانات الرابط الأول والأخير
+                f_datas = first_link.split("/")
+                l_datas = last_link.split("/")
+                if "https://t.me/c/" in first_link and "https://t.me/c/" in last_link:
+                    chatid = int("-100" + f_datas[4])
+                else:
+                    chatid = f_datas[3]  # username
 
+                # رقم الرسالة الأولى والأخيرة
+                f_msgid = int(f_datas[-1].replace("?single", "").strip())
+                l_msgid = int(l_datas[-1].replace("?single", "").strip())
+
+                # معالجة الرسائل من الأولى للأخيرة
+                for msgid in range(f_msgid, l_msgid+1):
+                    if "https://t.me/c/" in first_link:
+                        if acc is None:
+                            bot.send_message(message.chat.id,f"**String Session is not Set**")
+                            return
+                        handle_private(message, chatid, msgid)
+                    else:
+                        try:
+                            msg = bot.get_messages(chatid, msgid)
+                        except UsernameNotOccupied: 
+                            bot.send_message(message.chat.id,f"**The username is not occupied by anyone**")
+                            continue
+                        try:
+                            bot.copy_message(message.chat.id, msg.chat.id, msg.id)
+                        except:
+                            if acc is None:
+                                bot.send_message(message.chat.id,f"**String Session is not Set**")
+                                continue
+                            try:
+                                handle_private(message, chatid, msgid)
+                            except Exception as e:
+                                bot.send_message(message.chat.id,f"**Error** : __{e}__")
+                    time.sleep(3)
+            except Exception as e:
+                bot.send_message(message.chat.id, f"حدث خطأ أثناء معالجة الروابط: {e}")
+            return
+
+    # معالجة حالة /single
+    if user_id in user_single_state:
+        user_single_state.remove(user_id)
+        # نتوقع أن المستخدم أرسل رابط رسالة واحدة فقط
+        if message.text.startswith("https://t.me/"):
+            datas = message.text.split("/")
+            temp = datas[-1].replace("?single","").strip()
+            msgid = int(temp)
+            # private
+            if "https://t.me/c/" in message.text:
+                chatid = int("-100" + datas[4])
+                if acc is None:
+                    bot.send_message(message.chat.id,f"**String Session is not Set**", reply_to_message_id=message.id)
+                    return
+                handle_private(message, chatid, msgid)
+            # bot
+            elif "https://t.me/b/" in message.text:
+                username = datas[4]
+                if acc is None:
+                    bot.send_message(message.chat.id,f"**String Session is not Set**", reply_to_message_id=message.id)
+                    return
+                try: handle_private(message, username, msgid)
+                except Exception as e: bot.send_message(message.chat.id,f"**Error** : __{e}__", reply_to_message_id=message.id)
+            # public
+            else:
+                username = datas[3]
+                try: msg  = bot.get_messages(username, msgid)
+                except UsernameNotOccupied: 
+                    bot.send_message(message.chat.id,f"**The username is not occupied by anyone**", reply_to_message_id=message.id)
+                    return
+                try:
+                    bot.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
+                except:
+                    if acc is None:
+                        bot.send_message(message.chat.id,f"**String Session is not Set**", reply_to_message_id=message.id)
+                        return
+                    try: handle_private(message, username, msgid)
+                    except Exception as e: bot.send_message(message.chat.id,f"**Error** : __{e}__", reply_to_message_id=message.id)
+            return
+        else:
+            bot.send_message(message.chat.id, "الرابط غير صحيح، يرجى إرسال رابط رسالة تلغرام.")
+            return
+
+    # باقي الحالات
+    if message.text.startswith("https://t.me/+") or message.text.startswith("https://t.me/joinchat/"):
         if acc is None:
             bot.send_message(message.chat.id,f"**String Session is not Set**", reply_to_message_id=message.id)
             return
-
         try:
             try: acc.join_chat(message.text)
             except Exception as e: 
@@ -95,63 +216,11 @@ def save(client: pyrogram.client.Client, message: pyrogram.types.messages_and_me
                 return
             bot.send_message(message.chat.id,"**Chat Joined**", reply_to_message_id=message.id)
         except UserAlreadyParticipant:
-            bot.send_message(message.chat.id,"**Chat alredy Joined**", reply_to_message_id=message.id)
+            bot.send_message(message.chat.id,"**Chat already Joined**", reply_to_message_id=message.id)
         except InviteHashExpired:
             bot.send_message(message.chat.id,"**Invalid Link**", reply_to_message_id=message.id)
-
-    # getting message
-    elif "https://t.me/" in message.text:
-
-        datas = message.text.split("/")
-        temp = datas[-1].replace("?single","").split("-")
-        fromID = int(temp[0].strip())
-        try: toID = int(temp[1].strip())
-        except: toID = fromID
-
-        for msgid in range(fromID, toID+1):
-
-            # private
-            if "https://t.me/c/" in message.text:
-                chatid = int("-100" + datas[4])
-                
-                if acc is None:
-                    bot.send_message(message.chat.id,f"**String Session is not Set**", reply_to_message_id=message.id)
-                    return
-                
-                handle_private(message,chatid,msgid)
-            
-            # bot
-            elif "https://t.me/b/" in message.text:
-                username = datas[4]
-                
-                if acc is None:
-                    bot.send_message(message.chat.id,f"**String Session is not Set**", reply_to_message_id=message.id)
-                    return
-                try: handle_private(message,username,msgid)
-                except Exception as e: bot.send_message(message.chat.id,f"**Error** : __{e}__", reply_to_message_id=message.id)
-
-            # public
-            else:
-                username = datas[3]
-
-                try: msg  = bot.get_messages(username,msgid)
-                except UsernameNotOccupied: 
-                    bot.send_message(message.chat.id,f"**The username is not occupied by anyone**", reply_to_message_id=message.id)
-                    return
-                try:
-                    if '?single' not in message.text:
-                        bot.copy_message(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
-                    else:
-                        bot.copy_media_group(message.chat.id, msg.chat.id, msg.id, reply_to_message_id=message.id)
-                except:
-                    if acc is None:
-                        bot.send_message(message.chat.id,f"**String Session is not Set**", reply_to_message_id=message.id)
-                        return
-                    try: handle_private(message,username,msgid)
-                    except Exception as e: bot.send_message(message.chat.id,f"**Error** : __{e}__", reply_to_message_id=message.id)
-
-            # wait time
-            time.sleep(3)
+    else:
+        print(message.text)
 
 # handle private
 def handle_private(message: pyrogram.types.messages_and_media.message.Message, chatid: int, msgid: int):
@@ -160,7 +229,6 @@ def handle_private(message: pyrogram.types.messages_and_media.message.Message, c
 
     if "Text" == msg_type:
         safe_entities = filter_entities(msg.entities)
-        # إذا كانت هناك entities بعد الفلترة أرسلها، إذا لا أرسل الرسالة كنص فقط
         if safe_entities:
             try:
                 bot.send_message(message.chat.id, msg.text, entities=safe_entities, reply_to_message_id=message.id)
